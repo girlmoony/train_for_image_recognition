@@ -1,6 +1,6 @@
 # train_for_image_recognition
 # aim：
-画像認識・物体検出モデルの精度および提供品質の向上
+画像認識・物体検出モデルの精度および提供品質の向上（pytorchをベースに）
 
 # how to do:
 ・現行モデルの課題を分析し、類似事例の対応手法を検証して精度向上を図る  
@@ -12,3 +12,29 @@
 ・精度向上の一般的な方法（データ拡張・正則化・ハイパーパラメータ調整など）を一覧化  
 ・分類タスクにおける流行モデルや設定の活用法を整理  
 ・物体検出・セグメンテーションモデルの知見を分類タスクへ応用可能な形でまとめる  
+
+# issue:
+・ベースモデルの構造（effecientNet B0）  
+・短時間に精度高いモデルを学習する方法  
+    -hardware上（学習実行環境）での改善  
+      ・dataloaderで利用するcpu（コア）の数num_workersを適切に選ぶ。例：lscpuでコア数（24）、16/1socketなので、16に設定した  
+      ・pin_memory=Trueに設定した  
+        →学習時間を40%短縮できた  
+  -学習の前処理での改善  
+    ・transforms.GaussianBlur(kernel_size=11)→ transforms.RandomApply([transforms.GaussianBlur(kernel_size=11,sigma=(0.1, 2.0))], p=0.5)  
+    →学習時間を短縮できた（40%?） 
+  -学習際のパラメータ調整  
+    【1】optimizer（最適化アルゴリズム）の役割  
+      ・勾配（gradient）を使って、モデルのパラメータ（重み）を更新する ものです。  
+      ・loss.backward() で得られた勾配を基に、optimizer.step() によってパラメータを更新します。この更新に使われるのが「学習率（lr）」です  
+      ・代表的な optimizer（PyTorch）
+| Name  | feature |
+| ------------- | ------------- |
+| SGD | 最も基本的。勢い（momentum）を加えることで滑らかに進む  |
+| Adam | 自動でlrを調整する要素あり（モーメントベース）。安定かつ速い  |
+| RMSprop | 平均二乗勾配を使う。RNNでよく使われた  |
+| Adagrad, AdamW など | 	特殊な性質を持つ学習向けにチューニングされている |　　
+    【2】scheduler（学習率スケジューラ）の役割  
+    【3】optimizer と scheduler の関係  
+    
+    
