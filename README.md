@@ -15,19 +15,20 @@
 
 # issue:
 ## ・ datasetの準備 
-## ・ 前処理（pre-processing） 
-　- 推論の汎用性をアップするため、
+## ・ 前処理（pre-processing）   
+###  -学習の前処理での改善  
+- 推論の汎用性をアップするため、
  前処理入力画像を拡張する（randomapply(torchvision.transforms.ColorJitter(), GaussianBlur(kernel_size[, sigma])など)）
+```
+ - transforms.GaussianBlur(kernel_size=11)→ transforms.RandomApply([transforms.GaussianBlur(kernel_size=11,sigma=(0.1, 2.0))], p=0.5)  
+    →学習時間を短縮できた（40%?） 
+```
 ## ・ベースモデルの構造（effecientNet B0）  
 ## ・短時間に精度高いモデルを学習する方法  
 ### -hardware上（学習実行環境）での改善  
       ・dataloaderで利用するcpu（コア）の数num_workersを適切に選ぶ。例：lscpuでコア数（24）、16/1socketなので、16に設定した  
       ・pin_memory=Trueに設定した  
         →学習時間を40%短縮できた  
-        
-###  -学習の前処理での改善  
-    ・transforms.GaussianBlur(kernel_size=11)→ transforms.RandomApply([transforms.GaussianBlur(kernel_size=11,sigma=(0.1, 2.0))], p=0.5)  
-    →学習時間を短縮できた（40%?） 
     
 ###  -学習際のパラメータ調整  
     【1】optimizer（最適化アルゴリズム）の役割  
