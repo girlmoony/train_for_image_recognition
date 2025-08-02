@@ -16,6 +16,8 @@
 # issue:
 ## ・ datasetの準備 
 ## ・ 前処理（pre-processing） 
+　- 推論の汎用性をアップするため、
+ 前処理入力画像を拡張する（randomapply(torchvision.transforms.ColorJitter(), GaussianBlur(kernel_size[, sigma])など)）
 ## ・ベースモデルの構造（effecientNet B0）  
 ## ・短時間に精度高いモデルを学習する方法  
 ### -hardware上（学習実行環境）での改善  
