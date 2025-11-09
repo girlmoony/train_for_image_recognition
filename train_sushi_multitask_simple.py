@@ -8,7 +8,7 @@ Assumptions:
 - Datasets come from either CSVs (path,label_name) OR folder trees (ImageFolder-like).
 - MixUp/CutMix are applied **only** to the class head. Count head always trains on clean images.
 - class_to_idx is built from TRAIN+VAL combined (sorted by class name).
-Author: ChatGPT
+
 """
 
 import argparse
