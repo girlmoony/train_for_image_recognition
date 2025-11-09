@@ -6,7 +6,7 @@ Sushi Multitask Trainer
 - Heads: (A) class classification, (B) count classification (1/2/3貫)
 - MixUp/CutMix: applied ONLY to class head; count head always uses clean images
 - Supports: CSV mode (path,label_name) OR Folder mode (ImageFolder-like)
-Author: ChatGPT
+
 """
 
 import argparse
