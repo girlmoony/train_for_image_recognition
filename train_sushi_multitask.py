@@ -3,10 +3,10 @@
 """
 Sushi Multitask Trainer
 - Backbone: EfficientNet-B0 (torchvision)
-- Heads: (A) class classification, (B) count classification (1/2/3)
+- Heads: (A) class classification, (B) count classification (1/2/3貫)
 - MixUp/CutMix: applied ONLY to class head; count head always uses clean images
 - Supports: CSV mode (path,label_name) OR Folder mode (ImageFolder-like)
-Author: 
+Author: ChatGPT
 """
 
 import argparse
@@ -25,6 +25,71 @@ import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torchvision import models, transforms
+
+# ----------------------------
+# Domain helpers (sushi / non-sushi handling)
+# ----------------------------
+
+def parse_keyword_list(s: str):
+    return [w for w in [t.strip() for t in s.split(',')] if w]
+
+DEFAULT_SUSHI_KWS = [
+    "寿司","すし","鮨","にぎり","握り","軍艦","巻き","手巻き","巻","ちらし",
+    "まぐろ","マグロ","中とろ","大とろ","トロ","サーモン","はまち","ハマチ","えび","海老",
+    "いか","たこ","穴子","うに","イクラ","とびこ","たまご","玉子","炙り","ねぎとろ","とろたく",
+    "貫"  # 明示的なヒント
+]
+DEFAULT_NON_SUSHI_KWS = [
+    "ラーメン","らーめん","麺","うどん","そば","カレー","丼","唐揚げ","からあげ",
+    "ポテト","フライドポテト","ナゲット","デザート","アイス","ケーキ","プリン","ゼリー",
+    "ポップコーン"
+]
+
+def load_count_map(csv_path: str = "", json_path: str = ""):
+    """
+    Returns dict: label_name -> count (int in {0,1,2,3})
+    Priority: JSON over CSV if both provided.
+    """
+    mapping = {}
+    if json_path:
+        import json
+        with open(json_path, 'r', encoding='utf-8') as f:
+            obj = json.load(f)
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                try:
+                    vi = int(v)
+                except Exception:
+                    continue
+                if vi in (0,1,2,3):
+                    mapping[str(k)] = vi
+    elif csv_path:
+        import csv
+        with open(csv_path, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            if not {'label_name','count'}.issubset(set(reader.fieldnames or [])):
+                raise ValueError("count_map_csv must have columns: label_name,count")
+            for row in reader:
+                try:
+                    vi = int(row['count'])
+                except Exception:
+                    continue
+                if vi in (0,1,2,3):
+                    mapping[str(row['label_name'])] = vi
+    return mapping
+
+def is_likely_sushi(label_name: str, sushi_kws=None, nonsushi_kws=None) -> bool:
+    sushi_kws = sushi_kws or DEFAULT_SUSHI_KWS
+    nonsushi_kws = nonsushi_kws or DEFAULT_NON_SUSHI_KWS
+    # 非寿司キーワードが含まれていたら優先して非寿司扱い
+    for kw in nonsushi_kws:
+        if kw and kw in label_name:
+            return False
+    for kw in sushi_kws:
+        if kw and kw in label_name:
+            return True
+    # どちらにも当てはまらなければ寿司としては扱わない（安全側）
+    return False
 
 try:
     from tqdm import tqdm
@@ -80,7 +145,7 @@ def parse_count(label_name: str) -> int:
         return 2
 
     # デフォルト（見つからない場合：1貫扱い）
-    return 1
+    return 0
 
 
 @dataclass
@@ -143,11 +208,14 @@ def build_class_mapping(items: List[Item]) -> Dict[str, int]:
 # ----------------------------
 
 class SushiDataset(Dataset):
-    def __init__(self, items: List[Item], class_to_idx: Dict[str, int], transform=None):
+    def __init__(self, items: List[Item], class_to_idx: Dict[str, int], transform=None, sushi_kws=None, nonsushi_kws=None, count_map=None):
+        self.sushi_kws = sushi_kws
+        self.nonsushi_kws = nonsushi_kws
+        self.count_map = count_map or {}
         self.items = items
         self.class_to_idx = class_to_idx
         self.transform = transform
-
+        
     def __len__(self):
         return len(self.items)
 
@@ -157,7 +225,28 @@ class SushiDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         y_cls = self.class_to_idx[row.label_name]
-        y_cnt = parse_count(row.label_name)  # 0/1/2
+        # 1) explicit count map has highest priority
+        if row.label_name in self.count_map:
+            c = int(self.count_map[row.label_name])
+            if c in (1,2,3):
+                y_cnt = c - 1  # to 0..2
+            else:  # 0 or others -> mask
+                y_cnt = -1
+        else:
+            # 2) fallback to heuristic: only use when likely sushi AND label text contains count cues
+            if is_likely_sushi(row.label_name, self.sushi_kws, self.nonsushi_kws):
+                cnt = parse_count(row.label_name)
+                if row.label_name is None or ("1" not in row.label_name and "１" not in row.label_name and
+                                               "2" not in row.label_name and "２" not in row.label_name and
+                                               "3" not in row.label_name and "３" not in row.label_name and
+                                               ("一" not in row.label_name and "二" not in row.label_name and "三" not in row.label_name) and
+                                               ("壱" not in row.label_name and "弐" not in row.label_name and "参" not in row.label_name) and
+                                               ("二種" not in row.label_name and "三種" not in row.label_name)):
+                    y_cnt = -1
+                else:
+                    y_cnt = cnt
+            else:
+                y_cnt = -1
         return img, y_cls, y_cnt
 
 
@@ -259,7 +348,13 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
         # clean forward (used for count; also contributes to class loss)
         with torch.autocast(device_type=device.type, dtype=torch.float16):
             logits_cls_clean, logits_cnt = model(x)
-            loss_cnt = F.cross_entropy(logits_cnt, y_cnt)
+            # Masked count loss
+            mask = (y_cnt >= 0)
+            if mask.any():
+                loss_vec = F.cross_entropy(logits_cnt[mask], y_cnt[mask], weight=cnt_class_weights, reduction="mean")
+                loss_cnt = loss_vec
+            else:
+                loss_cnt = torch.tensor(0.0, device=device)
             loss_cls_clean = F.cross_entropy(logits_cls_clean, y_cls, label_smoothing=label_smoothing)
 
         # mixed forward (class only)
@@ -302,6 +397,7 @@ def evaluate(model, loader, device):
     model.eval()
     correct_cls = correct_cnt = total = 0
     cm_cnt = np.zeros((3, 3), dtype=int)
+    cnt_total_eval = 0
 
     for x, y_cls, y_cnt in tqdm(loader, desc="valid", leave=False):
         x = x.to(device); y_cls = y_cls.to(device); y_cnt = y_cnt.to(device)
@@ -311,16 +407,22 @@ def evaluate(model, loader, device):
         pred_cnt = logits_cnt.argmax(1)
 
         correct_cls += (pred_cls == y_cls).sum().item()
-        correct_cnt += (pred_cnt == y_cnt).sum().item()
         total += x.size(0)
 
-        for t, p in zip(y_cnt.cpu().numpy(), pred_cnt.cpu().numpy()):
-            cm_cnt[t, p] += 1
+        # evaluate count only where label exists (y_cnt >= 0)
+        mask = (y_cnt >= 0)
+        if mask.any():
+            correct_cnt += (pred_cnt[mask] == y_cnt[mask]).sum().item()
+            cnt_total_eval += int(mask.sum().item())
+            for t, p in zip(y_cnt[mask].cpu().numpy(), pred_cnt[mask].cpu().numpy()):
+                cm_cnt[t, p] += 1
 
+    acc_cnt = (correct_cnt / cnt_total_eval) if cnt_total_eval > 0 else 0.0
     return {
         "acc_cls": correct_cls / total,
-        "acc_cnt": correct_cnt / total,
+        "acc_cnt": acc_cnt,
         "cm_cnt": cm_cnt,
+        "cnt_eval_samples": cnt_total_eval,
     }
 
 
@@ -347,6 +449,12 @@ def main():
     parser.add_argument("--out_dir", type=str, default="./outputs")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--count_map_csv", type=str, default="", help="CSV with columns: label_name,count (0=non-sushi,1,2,3)")
+    parser.add_argument("--count_map_json", type=str, default="", help="JSON object mapping label_name -> count (0/1/2/3)")
+    parser.add_argument("--sushi_keywords", type=str, default="",
+                        help="Comma-separated override keywords to detect sushi labels")
+    parser.add_argument("--nonsushi_keywords", type=str, default="",
+                        help="Comma-separated override keywords to detect non-sushi labels")
     args = parser.parse_args()
 
     if (args.train_dir and not args.val_dir) or (args.val_dir and not args.train_dir):
@@ -378,8 +486,17 @@ def main():
 
     # ---------- Datasets ----------
     train_tf, val_tf = build_transforms(args.img_size)
-    train_ds = SushiDataset(train_items, class_to_idx, transform=train_tf)
-    val_ds   = SushiDataset(val_items,   class_to_idx, transform=val_tf)
+    sushi_kws = parse_keyword_list(args.sushi_keywords) if args.sushi_keywords else DEFAULT_SUSHI_KWS
+    nonsushi_kws = parse_keyword_list(args.nonsushi_keywords) if args.nonsushi_keywords else DEFAULT_NON_SUSHI_KWS
+
+    count_map = load_count_map(csv_path=args.count_map_csv, json_path=args.count_map_json)
+    if count_map:
+        print(f"Loaded count map entries: {len(count_map)}")
+
+    train_ds = SushiDataset(train_items, class_to_idx, transform=train_tf,
+                            sushi_kws=sushi_kws, nonsushi_kws=nonsushi_kws, count_map=count_map)
+    val_ds   = SushiDataset(val_items,   class_to_idx, transform=val_tf,
+                            sushi_kws=sushi_kws, nonsushi_kws=nonsushi_kws, count_map=count_map)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.num_workers, pin_memory=True, drop_last=False)
@@ -389,6 +506,19 @@ def main():
     # ---------- Model / Opt ----------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = EffNetB0_Count(n_classes=n_classes).to(device)
+
+    # ----- Build count class weights (only from sushi & available count labels) -----
+    cnt_hist = np.zeros(3, dtype=np.int64)
+    for _, _, y_cnt in DataLoader(train_ds, batch_size=256, shuffle=False, num_workers=0):
+        y_cnt = np.array(y_cnt)
+        for k in (0,1,2):
+            cnt_hist[k] += int((y_cnt == k).sum())
+    # Avoid zero division; inverse frequency weighting
+    cnt_weights = np.array([1.0/(h if h>0 else 1.0) for h in cnt_hist], dtype=np.float32)
+    cnt_weights = cnt_weights / cnt_weights.sum() * 3.0  # normalize to mean 1
+    cnt_class_weights = torch.tensor(cnt_weights, dtype=torch.float32, device=device)
+    print("Count label histogram (train, mask excl.):", cnt_hist.tolist())
+    print("Count class weights:", cnt_weights.tolist())
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -408,7 +538,7 @@ def main():
 
         print(f"[{epoch:02d}/{args.epochs}] {dt:.1f}s | "
               f"loss={tr['loss']:.4f} (cls {tr['loss_cls']:.4f}/cnt {tr['loss_cnt']:.4f}) | "
-              f"acc_cls={ev['acc_cls']:.4f} acc_cnt={ev['acc_cnt']:.4f}")
+              f"acc_cls={ev['acc_cls']:.4f} acc_cnt={ev['acc_cnt']:.4f} (n={ev.get('cnt_eval_samples',0)})")
         print("count confusion matrix (rows=true 1/2/3, cols=pred):")
         print(ev['cm_cnt'])
 
@@ -439,7 +569,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-python train_sushi_multitask.py \
-  --train_dir /path/to/train_dir \
-  --val_dir   /path/to/val_dir \
-  --img_size 300 --batch_size 64 --epochs 20 --lr 3e-4 --out_dir ./outputs
